@@ -1,0 +1,30 @@
+# TCI Default Configuration
+# =========================
+
+# TCI Clustering
+tci:
+  K: 32                  # Number of k-means centroids per document
+  n_init: 1              # k-means initializations (1 is sufficient; CV < 0.09)
+  max_iter: 50           # k-means iterations
+
+# FDE Configuration (MUVERA specification)
+fde:
+  R: 10                  # Number of SimHash repetitions
+  B: 2                   # Number of buckets per repetition
+  # Total FDE dimension = R * B * d = 10 * 2 * 128 = 2,560
+
+# Pipeline Budgets
+pipeline:
+  W_prime: 1000          # FDE candidates (Stage 1 output)
+  W: 200                 # Chamfer rerank budget (Stage 2 output)
+
+# E/M Ratio
+em_ratio:
+  threshold: 1.3         # ρ > 1.3 → deploy TCI
+  n_sample_queries: 200  # Queries for E/M computation
+  bootstrap_trials: 100  # For confidence interval on ρ
+
+# Recommended K by document type
+# Text (|D| < 200 tokens):    K = 32
+# Visual (|D| > 500 patches): K = 64
+# Visual with ρ > 2.5:        K = 64, W_prime = 3000

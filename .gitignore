@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+*.egg-info/
+data/**/*.npy
+data/**/*.json
+!data/.gitkeep
+*.zip
+.DS_Store

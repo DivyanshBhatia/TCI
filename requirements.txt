@@ -1,0 +1,8 @@
+numpy>=1.24,<2.0
+scikit-learn>=1.3
+scipy>=1.11
+tqdm>=4.65
+torch>=2.0
+datasets>=2.14
+transformers>=4.35
+beir>=2.0.0
