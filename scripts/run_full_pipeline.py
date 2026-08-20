@@ -125,32 +125,35 @@ def run_pipeline(query_tokens, corpus_tokens, ground_truth,
         gt_set = set(gt)
         n_rel = len(gt_set)
 
+        # Skip if embeddings have NaN/inf
+        if not np.isfinite(q_tok).all():
+            continue
+
         # ============================================
         # Pipeline 1: Brute-force MaxSim (exact)
         # ============================================
         if run_bruteforce:
             bf_scores = []
             for di in range(n_docs):
+                if not np.isfinite(corpus_tokens[di]).all():
+                    bf_scores.append((di, -1e9))
+                    continue
                 bf_scores.append((di, chamfer_score(q_tok, corpus_tokens[di])))
             bf_scores.sort(key=lambda x: -x[1])
             bf_ranking = [di for di, _ in bf_scores]
 
-            for metric_name, metric_fn, k_val in [
-                ('r10', lambda r, g, k: len(set(r[:k]) & g) / len(g), 10),
-                ('r100', lambda r, g, k: len(set(r[:k]) & g) / len(g), 100),
-                ('ndcg10', lambda r, g, k: compute_ndcg(r, g, k), 10),
-                ('mrr', lambda r, g, k: compute_mrr(r, g), None),
-            ]:
-                if k_val is not None:
-                    metrics['bruteforce'][metric_name].append(metric_fn(bf_ranking, gt, k_val))
-                else:
-                    metrics['bruteforce'][metric_name].append(metric_fn(bf_ranking, gt, None))
+            metrics['bruteforce']['r10'].append(len(set(bf_ranking[:10]) & gt_set) / n_rel)
+            metrics['bruteforce']['r100'].append(len(set(bf_ranking[:100]) & gt_set) / n_rel)
+            metrics['bruteforce']['ndcg10'].append(compute_ndcg(bf_ranking, gt, 10))
+            metrics['bruteforce']['mrr'].append(compute_mrr(bf_ranking, gt))
 
         # ============================================
         # FDE candidate retrieval (shared by MUVERA and TCI)
         # ============================================
         q_fde = encode_fde_query(q_tok)
         fde_scores = doc_fdes @ q_fde
+        # Guard against NaN/inf in FDE scores
+        fde_scores = np.nan_to_num(fde_scores, nan=-1e9, posinf=-1e9, neginf=-1e9)
         top_W_prime = np.argsort(-fde_scores)[:W_prime]
 
         # ============================================
