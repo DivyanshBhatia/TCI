@@ -5,8 +5,22 @@ Tests TCI generalization across model architectures.
 Supported models:
   1. ColBERTv2 (text) — colbert-ir/colbertv2.0
   2. ColBERTv1 (text) — colbert-ir/colbertv1.9
-  3. ColQwen2 (visual) — vidore/colqwen2-v1.0
-  4. Jina-ColBERT-v2 (text) — jinaai/jina-colbert-v2
+  3. ColPali (visual) — vidore/colpali-v1.3
+  4. ColQwen2 (visual) — vidore/colqwen2-v1.0
+  5. XTR (text) — google/xtr-base-en
+  6. Jina-ColBERT-v2 (text) — jinaai/jina-colbert-v2
+
+# Compatibility patches for version conflicts
+try:
+    import peft.import_utils; peft.import_utils.is_torchao_available = lambda: False
+except: pass
+
+# Fix ColBERT + newer transformers: all_tied_weights_keys missing
+try:
+    import torch.nn as nn
+    if not hasattr(nn.Module, 'all_tied_weights_keys'):
+        nn.Module.all_tied_weights_keys = property(lambda self: getattr(self, '_tied_weights_keys', set()))
+except: pass
 
 Usage in Colab:
   Set MODEL_NAME and DATASET, run all cells.
