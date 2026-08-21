@@ -23,22 +23,23 @@ Usage in Colab:
 # ============================================================
 # CELL 2: Configuration
 # ============================================================
-import os, json, numpy as np, torch
+import os, json, numpy as np, torch, argparse, sys
 from tqdm import tqdm
 
-# ---- CHOOSE MODEL ----
-# Options:
-#   "colbertv2"     — colbert-ir/colbertv2.0 (text, 128 dim)
-#   "colbertv1"     — colbert-ir/colbertv1.9 (text, 128 dim)
-#   "colqwen2"      — vidore/colqwen2-v1.0 (visual, 128 dim)
-#   "colqwen2.5"    — vidore/colqwen2.5-v0.2 (visual, 128 dim)
-#   "jina-colbert"  — jinaai/jina-colbert-v2 (text, 128 dim)
-MODEL_NAME = "colqwen2"
+parser = argparse.ArgumentParser()
+parser.add_argument("--model", type=str, default="colbertv2",
+                    choices=["colbertv2", "colbertv1", "colpali", "colqwen2", "colqwen2.5", "xtr", "jina-colbert"],
+                    help="Model to encode with")
+parser.add_argument("--dataset", type=str, default="scifact",
+                    help="Dataset name (e.g., scifact, fiqa, scidocs, vidore_v3_finance, docvqa)")
+parser.add_argument("--output-dir", type=str, default=None,
+                    help="Output directory (default: {dataset}_{model})")
+parser.add_argument("--doc-batch-size", type=int, default=64)
+parser.add_argument("--query-batch-size", type=int, default=16)
+args = parser.parse_args()
 
-# ---- CHOOSE DATASET ----
-# For visual models: "vidore_v3_finance", "docvqa", "arxivqa"
-# For text models: "scifact", "fiqa", "nfcorpus"
-DATASET = "vidore_v3_finance"
+MODEL_NAME = args.model
+DATASET = args.dataset
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"Model: {MODEL_NAME}")
@@ -155,6 +156,96 @@ def load_model(model_name):
             return all_embs, all_lengths
 
         return encode_images, encode_queries, None, "visual"
+
+    elif model_name == "colpali":
+        from colpali_engine.models import ColPali, ColPaliProcessor
+
+        model = ColPali.from_pretrained(
+            "vidore/colpali-v1.3",
+            torch_dtype=torch.bfloat16,
+            device_map=device,
+        )
+        processor = ColPaliProcessor.from_pretrained("vidore/colpali-v1.3")
+        model.eval()
+
+        def encode_images(images, batch_size=4):
+            all_embs, all_lengths = [], []
+            for i in tqdm(range(0, len(images), batch_size), desc="Pages"):
+                batch = images[i:i+batch_size]
+                inputs = processor.process_images(batch).to(device)
+                with torch.no_grad():
+                    embeddings = model(**inputs)
+                for emb in embeddings:
+                    e = emb.cpu().float().numpy()
+                    all_embs.append(e)
+                    all_lengths.append(len(e))
+            return all_embs, all_lengths
+
+        def encode_queries(texts, batch_size=16):
+            all_embs, all_lengths = [], []
+            for i in tqdm(range(0, len(texts), batch_size), desc="Queries"):
+                batch = texts[i:i+batch_size]
+                inputs = processor.process_queries(batch).to(device)
+                with torch.no_grad():
+                    embeddings = model(**inputs)
+                for emb in embeddings:
+                    e = emb.cpu().float().numpy()
+                    all_embs.append(e)
+                    all_lengths.append(len(e))
+            return all_embs, all_lengths
+
+        return encode_images, encode_queries, None, "visual"
+
+    elif model_name == "xtr":
+        from transformers import AutoTokenizer, T5EncoderModel
+
+        tokenizer = AutoTokenizer.from_pretrained("google/xtr-base-en")
+        model = T5EncoderModel.from_pretrained("google/xtr-base-en")
+        model = model.to(device).eval()
+
+        def encode_docs(texts, batch_size=32):
+            all_embs, all_lengths = [], []
+            for i in tqdm(range(0, len(texts), batch_size), desc="Docs"):
+                batch = texts[i:i+batch_size]
+                inputs = tokenizer(batch, padding=True, truncation=True,
+                                   max_length=512, return_tensors="pt").to(device)
+                with torch.no_grad():
+                    outputs = model(**inputs)
+                    embs = outputs.last_hidden_state
+                    mask = inputs["attention_mask"]
+
+                for j in range(len(batch)):
+                    length = int(mask[j].sum())
+                    e = embs[j, :length].cpu().numpy().astype(np.float32)
+                    # L2 normalize each token embedding
+                    norms = np.linalg.norm(e, axis=1, keepdims=True)
+                    e = e / np.maximum(norms, 1e-8)
+                    all_embs.append(e)
+                    all_lengths.append(len(e))
+            return all_embs, all_lengths
+
+        def encode_queries(texts, batch_size=32):
+            all_embs, all_lengths = [], []
+            for i in tqdm(range(0, len(texts), batch_size), desc="Queries"):
+                batch = texts[i:i+batch_size]
+                inputs = tokenizer(batch, padding=True, truncation=True,
+                                   max_length=32, return_tensors="pt").to(device)
+                with torch.no_grad():
+                    outputs = model(**inputs)
+                    embs = outputs.last_hidden_state
+                    mask = inputs["attention_mask"]
+
+                for j in range(len(batch)):
+                    length = int(mask[j].sum())
+                    e = embs[j, :length].cpu().numpy().astype(np.float32)
+                    # L2 normalize each token embedding
+                    norms = np.linalg.norm(e, axis=1, keepdims=True)
+                    e = e / np.maximum(norms, 1e-8)
+                    all_embs.append(e)
+                    all_lengths.append(len(e))
+            return all_embs, all_lengths
+
+        return encode_docs, encode_queries, None, "text"
 
     elif model_name == "jina-colbert":
         from transformers import AutoModel, AutoTokenizer
@@ -335,11 +426,11 @@ print(f"\nLoaded: {len(doc_data)} docs, {len(query_texts)} queries, {n_with_gt} 
 print(f"\nEncoding with {MODEL_NAME}...")
 
 if is_visual:
-    doc_embs, doc_lengths = encode_docs_fn(doc_data, batch_size=4)
+    doc_embs, doc_lengths = encode_docs_fn(doc_data, batch_size=args.doc_batch_size if args.doc_batch_size != 64 else 4)
 else:
-    doc_embs, doc_lengths = encode_docs_fn(doc_data, batch_size=64)
+    doc_embs, doc_lengths = encode_docs_fn(doc_data, batch_size=args.doc_batch_size)
 
-query_embs, query_lengths = encode_queries_fn(query_texts, batch_size=16)
+query_embs, query_lengths = encode_queries_fn(query_texts, batch_size=args.query_batch_size)
 
 print(f"  Docs: {len(doc_embs)}, avg {np.mean(doc_lengths):.0f} vectors")
 print(f"  Queries: {len(query_embs)}, avg {np.mean(query_lengths):.0f} vectors")
@@ -348,7 +439,7 @@ print(f"  Dim: {doc_embs[0].shape[1]}")
 # ============================================================
 # CELL 6: Save
 # ============================================================
-out_dir = f"/content/{DATASET}_{MODEL_NAME}"
+out_dir = args.output_dir if args.output_dir else f"{DATASET}_{MODEL_NAME}"
 os.makedirs(out_dir, exist_ok=True)
 
 corpus_flat = np.vstack(doc_embs).astype(np.float32)
@@ -366,9 +457,10 @@ print(f"\nSaved to {out_dir}")
 print(f"  Corpus: {corpus_flat.shape}")
 print(f"  Queries: {query_flat.shape}")
 
-import shutil
-shutil.make_archive(out_dir, 'zip', '/content', f'{DATASET}_{MODEL_NAME}')
-print(f"  Zipped: {out_dir}.zip")
+# Optionally zip for download (uncomment if needed)
+# import shutil
+# shutil.make_archive(out_dir, 'zip', '.', out_dir)
+# print(f"  Zipped: {out_dir}.zip")
 
 print(f"\nRun locally:")
 print(f"  python run_theory_validation.py --embeddings-dir {DATASET}_{MODEL_NAME}")
