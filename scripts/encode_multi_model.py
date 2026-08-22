@@ -25,6 +25,7 @@ if not hasattr(nn.Module, "all_tied_weights_keys"):
 try:
     import transformers.modeling_utils as _mu
     import inspect as _insp
+    import importlib as _il
     _src_file = _insp.getfile(_mu)
     with open(_src_file, 'r') as _f:
         _code = _f.read()
@@ -44,6 +45,7 @@ try:
     if _changed:
         with open(_src_file, 'w') as _f:
             _f.write(_code)
+        _il.reload(_mu)
 except:
     pass
 
