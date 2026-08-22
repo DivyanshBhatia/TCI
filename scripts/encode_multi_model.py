@@ -1,43 +1,74 @@
+# ============================================================
+# Compatibility patches — must run before any imports
+# ============================================================
+
+# Fix 1: peft torchao version check
+try:
+    import peft.import_utils
+    peft.import_utils.is_torchao_available = lambda: False
+except:
+    pass
+
+# Fix 2: ColBERT + newer transformers: all_tied_weights_keys
+import torch.nn as nn
+if not hasattr(nn.Module, "all_tied_weights_keys"):
+    def _get_tied(self):
+        val = self.__dict__.get("_all_tied_weights_keys_store", None)
+        if val is not None:
+            return val
+        return {}
+    def _set_tied(self, value):
+        self.__dict__["_all_tied_weights_keys_store"] = value if value is not None else {}
+    nn.Module.all_tied_weights_keys = property(_get_tied, _set_tied)
+
+# Fix 3: transformers list | set incompatibility
+try:
+    import transformers.modeling_utils as _mu
+    import inspect as _insp
+    _src_file = _insp.getfile(_mu)
+    with open(_src_file, 'r') as _f:
+        _code = _f.read()
+    _changed = False
+    if '(self._keys_to_ignore_on_load_unexpected or set()) |' in _code:
+        _code = _code.replace(
+            '(self._keys_to_ignore_on_load_unexpected or set()) | additional_unexpected_patterns',
+            'set(self._keys_to_ignore_on_load_unexpected or []) | additional_unexpected_patterns'
+        )
+        _changed = True
+    if '(self._keys_to_ignore_on_load_missing or set()) |' in _code:
+        _code = _code.replace(
+            '(self._keys_to_ignore_on_load_missing or set()) | additional_missing_patterns',
+            'set(self._keys_to_ignore_on_load_missing or []) | additional_missing_patterns'
+        )
+        _changed = True
+    if _changed:
+        with open(_src_file, 'w') as _f:
+            _f.write(_code)
+except:
+    pass
+
+# ============================================================
+# Main script
+# ============================================================
 """
 Encode datasets with different multi-vector models.
-Tests TCI generalization across model architectures.
 
 Supported models:
-  1. ColBERTv2 (text) — colbert-ir/colbertv2.0
-  2. ColBERTv1 (text) — colbert-ir/colbertv1.9
-  3. ColPali (visual) — vidore/colpali-v1.3
-  4. ColQwen2 (visual) — vidore/colqwen2-v1.0
-  5. XTR (text) — google/xtr-base-en
-  6. Jina-ColBERT-v2 (text) — jinaai/jina-colbert-v2
+  1. ColBERTv2 (text, d=128) — colbert-ir/colbertv2.0
+  2. ColBERTv1 (text, d=128) — colbert-ir/colbertv1.9
+  3. ColPali (visual, d=128) — vidore/colpali-v1.3
+  4. ColQwen2 (visual, d=128) — vidore/colqwen2-v1.0
+  5. XTR (text, d=768) — google/xtr-base-en
+  6. Jina-ColBERT (text, d=128) — jinaai/jina-colbert-v2
 
-# Compatibility patches for version conflicts
-try:
-    import peft.import_utils; peft.import_utils.is_torchao_available = lambda: False
-except: pass
-
-# Fix ColBERT + newer transformers: all_tied_weights_keys missing
-try:
-    import torch.nn as nn
-    if not hasattr(nn.Module, 'all_tied_weights_keys'):
-        nn.Module.all_tied_weights_keys = property(lambda self: getattr(self, '_tied_weights_keys', set()))
-except: pass
-
-Usage in Colab:
-  Set MODEL_NAME and DATASET, run all cells.
-  Then run theory+margin locally.
+Usage:
+  python encode_multi_model.py --model colbertv2 --dataset scifact
+  python encode_multi_model.py --model colpali --dataset docvqa
+  python encode_multi_model.py --model xtr --dataset fiqa
+  python encode_multi_model.py --model colbertv2 --dataset msmarco --output-dir msmarco_colbertv2
 """
 
-# ============================================================
-# CELL 1: Install dependencies (uncomment as needed)
-# ============================================================
-# !pip install colpali-engine torch datasets pillow
-# !pip install colbert-ai  # for ColBERTv1/v2
-# !pip install einops  # for Jina-ColBERT
-
-# ============================================================
-# CELL 2: Configuration
-# ============================================================
-import os, json, numpy as np, torch, argparse, sys
+import os, json, numpy as np, torch, argparse
 from tqdm import tqdm
 
 parser = argparse.ArgumentParser()
@@ -61,47 +92,19 @@ print(f"Dataset: {DATASET}")
 print(f"Device: {device}")
 
 # ============================================================
-# CELL 3: Load model
+# Model loaders
 # ============================================================
 
 def load_model(model_name):
-    """Load model and return encode functions."""
+    """Load model and return (encode_docs, encode_queries, tokenizer, modality)."""
 
-    if model_name == "colbertv2":
+    if model_name in ("colbertv2", "colbertv1"):
         from colbert.infra import ColBERTConfig
         from colbert.modeling.checkpoint import Checkpoint
+
+        model_path = "colbert-ir/colbertv2.0" if model_name == "colbertv2" else "colbert-ir/colbertv1.9"
         config = ColBERTConfig(doc_maxlen=180, query_maxlen=32)
-        ckpt = Checkpoint("colbert-ir/colbertv2.0", colbert_config=config)
-
-        def encode_docs(texts, batch_size=64):
-            all_embs, all_lengths = [], []
-            for i in tqdm(range(0, len(texts), batch_size), desc="Docs"):
-                batch = texts[i:i+batch_size]
-                embs = ckpt.docFromText(batch)
-                for emb in embs:
-                    e = emb.cpu().numpy().astype(np.float32)
-                    all_embs.append(e)
-                    all_lengths.append(len(e))
-            return all_embs, all_lengths
-
-        def encode_queries(texts, batch_size=64):
-            all_embs, all_lengths = [], []
-            for i in tqdm(range(0, len(texts), batch_size), desc="Queries"):
-                batch = texts[i:i+batch_size]
-                embs = ckpt.queryFromText(batch)
-                for emb in embs:
-                    e = emb.cpu().numpy().astype(np.float32)
-                    all_embs.append(e)
-                    all_lengths.append(len(e))
-            return all_embs, all_lengths
-
-        return encode_docs, encode_queries, None, "text"
-
-    elif model_name == "colbertv1":
-        from colbert.infra import ColBERTConfig
-        from colbert.modeling.checkpoint import Checkpoint
-        config = ColBERTConfig(doc_maxlen=180, query_maxlen=32)
-        ckpt = Checkpoint("colbert-ir/colbertv1.9", colbert_config=config)
+        ckpt = Checkpoint(model_path, colbert_config=config)
 
         def encode_docs(texts, batch_size=64):
             all_embs, all_lengths = [], []
@@ -130,16 +133,8 @@ def load_model(model_name):
     elif model_name in ("colqwen2", "colqwen2.5"):
         from colpali_engine.models import ColQwen2, ColQwen2Processor
 
-        if model_name == "colqwen2":
-            model_path = "vidore/colqwen2-v1.0"
-        else:
-            model_path = "vidore/colqwen2.5-v0.2"
-
-        model = ColQwen2.from_pretrained(
-            model_path,
-            torch_dtype=torch.bfloat16,
-            device_map=device,
-        )
+        model_path = "vidore/colqwen2-v1.0" if model_name == "colqwen2" else "vidore/colqwen2.5-v0.2"
+        model = ColQwen2.from_pretrained(model_path, torch_dtype=torch.bfloat16, device_map=device)
         processor = ColQwen2Processor.from_pretrained(model_path)
         model.eval()
 
@@ -172,38 +167,46 @@ def load_model(model_name):
         return encode_images, encode_queries, None, "visual"
 
     elif model_name == "colpali":
-        from colpali_engine.models import ColPali, ColPaliProcessor
+        # Load ColPali directly — avoids colpali_engine import chain
+        from transformers import PaliGemmaForConditionalGeneration, AutoProcessor
 
-        model = ColPali.from_pretrained(
-            "vidore/colpali-v1.3",
-            torch_dtype=torch.bfloat16,
-            device_map=device,
-        )
-        processor = ColPaliProcessor.from_pretrained("vidore/colpali-v1.3")
-        model.eval()
+        base_model = PaliGemmaForConditionalGeneration.from_pretrained(
+            "vidore/colpali-v1.3", torch_dtype=torch.bfloat16, device_map=device)
+        processor = AutoProcessor.from_pretrained("vidore/colpali-v1.3")
+        base_model.eval()
 
         def encode_images(images, batch_size=4):
             all_embs, all_lengths = [], []
             for i in tqdm(range(0, len(images), batch_size), desc="Pages"):
                 batch = images[i:i+batch_size]
-                inputs = processor.process_images(batch).to(device)
+                inputs = processor(
+                    text=["Describe the image."] * len(batch),
+                    images=batch, return_tensors="pt", padding=True,
+                ).to(device)
                 with torch.no_grad():
-                    embeddings = model(**inputs)
-                for emb in embeddings:
-                    e = emb.cpu().float().numpy()
-                    all_embs.append(e)
-                    all_lengths.append(len(e))
+                    outputs = base_model(**inputs, output_hidden_states=True)
+                    embs = outputs.hidden_states[-1]
+                    for j in range(len(batch)):
+                        e = embs[j].cpu().float().numpy()
+                        all_embs.append(e)
+                        all_lengths.append(len(e))
             return all_embs, all_lengths
 
         def encode_queries(texts, batch_size=16):
             all_embs, all_lengths = [], []
             for i in tqdm(range(0, len(texts), batch_size), desc="Queries"):
                 batch = texts[i:i+batch_size]
-                inputs = processor.process_queries(batch).to(device)
+                inputs = processor(
+                    text=batch, return_tensors="pt",
+                    padding=True, truncation=True, max_length=50,
+                ).to(device)
                 with torch.no_grad():
-                    embeddings = model(**inputs)
-                for emb in embeddings:
-                    e = emb.cpu().float().numpy()
+                    outputs = base_model(**inputs, output_hidden_states=True)
+                    embs = outputs.hidden_states[-1]
+                    mask = inputs["attention_mask"]
+                for j in range(len(batch)):
+                    length = int(mask[j].sum())
+                    e = embs[j, :length].cpu().float().numpy()
                     all_embs.append(e)
                     all_lengths.append(len(e))
             return all_embs, all_lengths
@@ -227,11 +230,9 @@ def load_model(model_name):
                     outputs = model(**inputs)
                     embs = outputs.last_hidden_state
                     mask = inputs["attention_mask"]
-
                 for j in range(len(batch)):
                     length = int(mask[j].sum())
                     e = embs[j, :length].cpu().numpy().astype(np.float32)
-                    # L2 normalize each token embedding
                     norms = np.linalg.norm(e, axis=1, keepdims=True)
                     e = e / np.maximum(norms, 1e-8)
                     all_embs.append(e)
@@ -248,11 +249,9 @@ def load_model(model_name):
                     outputs = model(**inputs)
                     embs = outputs.last_hidden_state
                     mask = inputs["attention_mask"]
-
                 for j in range(len(batch)):
                     length = int(mask[j].sum())
                     e = embs[j, :length].cpu().numpy().astype(np.float32)
-                    # L2 normalize each token embedding
                     norms = np.linalg.norm(e, axis=1, keepdims=True)
                     e = e / np.maximum(norms, 1e-8)
                     all_embs.append(e)
@@ -276,10 +275,8 @@ def load_model(model_name):
                                    max_length=180, return_tensors="pt").to(device)
                 with torch.no_grad():
                     outputs = model(**inputs)
-                    # Jina-ColBERT outputs last_hidden_state
                     embs = outputs.last_hidden_state
                     mask = inputs["attention_mask"]
-
                 for j in range(len(batch)):
                     length = int(mask[j].sum())
                     e = embs[j, :length].cpu().numpy().astype(np.float32)
@@ -297,7 +294,6 @@ def load_model(model_name):
                     outputs = model(**inputs)
                     embs = outputs.last_hidden_state
                     mask = inputs["attention_mask"]
-
                 for j in range(len(batch)):
                     length = int(mask[j].sum())
                     e = embs[j, :length].cpu().numpy().astype(np.float32)
@@ -316,7 +312,7 @@ encode_docs_fn, encode_queries_fn, _, modality = load_model(MODEL_NAME)
 print(f"Loaded! Modality: {modality}")
 
 # ============================================================
-# CELL 4: Load dataset
+# Dataset loaders
 # ============================================================
 from datasets import load_dataset
 
@@ -330,7 +326,6 @@ def load_vidore_v3(name):
         "vidore_v3_physics": "vidore/vidore_v3_physics",
     }
     hf_id = hf_map.get(name, name)
-
     corpus_ds = load_dataset(hf_id, "corpus", split="test")
     queries_ds = load_dataset(hf_id, "queries", split="test")
     qrels_ds = load_dataset(hf_id, "qrels", split="test")
@@ -391,7 +386,8 @@ def load_vidore_v1(name):
     for qi in range(len(queries)):
         ground_truth.append(list(qrels_map.get(qi, {}).keys()))
 
-    return images, queries, [str(i) for i in range(len(queries))], ground_truth, [str(i) for i in range(len(images))]
+    return images, queries, [str(i) for i in range(len(queries))], \
+           ground_truth, [str(i) for i in range(len(images))]
 
 
 def load_beir(name):
@@ -420,9 +416,13 @@ def load_beir(name):
     return doc_texts, query_texts, qid_list, ground_truth, did_list
 
 
-# Load based on dataset type
-if DATASET.startswith("vidore_v3"):
-    doc_data, query_texts, query_ids, ground_truth, corpus_ids = load_vidore_v3(DATASET)
+# ============================================================
+# Load dataset
+# ============================================================
+if DATASET.startswith("vidore_v3") or DATASET.startswith("v3_"):
+    # Handle both "vidore_v3_finance" and "v3_industrial"
+    ds_name = DATASET if DATASET.startswith("vidore_v3") else f"vidore_{DATASET}"
+    doc_data, query_texts, query_ids, ground_truth, corpus_ids = load_vidore_v3(ds_name)
     is_visual = True
 elif DATASET in ("docvqa", "arxivqa", "tabfquad", "shiftproject", "infovqa"):
     doc_data, query_texts, query_ids, ground_truth, corpus_ids = load_vidore_v1(DATASET)
@@ -435,12 +435,13 @@ n_with_gt = sum(1 for gt in ground_truth if len(gt) > 0)
 print(f"\nLoaded: {len(doc_data)} docs, {len(query_texts)} queries, {n_with_gt} with ground truth")
 
 # ============================================================
-# CELL 5: Encode
+# Encode
 # ============================================================
 print(f"\nEncoding with {MODEL_NAME}...")
 
 if is_visual:
-    doc_embs, doc_lengths = encode_docs_fn(doc_data, batch_size=args.doc_batch_size if args.doc_batch_size != 64 else 4)
+    batch = args.doc_batch_size if args.doc_batch_size != 64 else 4
+    doc_embs, doc_lengths = encode_docs_fn(doc_data, batch_size=batch)
 else:
     doc_embs, doc_lengths = encode_docs_fn(doc_data, batch_size=args.doc_batch_size)
 
@@ -451,7 +452,7 @@ print(f"  Queries: {len(query_embs)}, avg {np.mean(query_lengths):.0f} vectors")
 print(f"  Dim: {doc_embs[0].shape[1]}")
 
 # ============================================================
-# CELL 6: Save
+# Save
 # ============================================================
 out_dir = args.output_dir if args.output_dir else f"{DATASET}_{MODEL_NAME}"
 os.makedirs(out_dir, exist_ok=True)
@@ -475,8 +476,3 @@ print(f"  Queries: {query_flat.shape}")
 # import shutil
 # shutil.make_archive(out_dir, 'zip', '.', out_dir)
 # print(f"  Zipped: {out_dir}.zip")
-
-print(f"\nRun locally:")
-print(f"  python run_theory_validation.py --embeddings-dir {DATASET}_{MODEL_NAME}")
-print(f"  python run_margin_analysis.py --embeddings-dir {DATASET}_{MODEL_NAME}")
-print(f"  python run_significance.py --embeddings-dir {DATASET}_{MODEL_NAME}")
